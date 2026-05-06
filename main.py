@@ -2,8 +2,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
+from fastapi.staticfiles import StaticFiles
 import asyncio
 import json
+import os
+import uuid
+from models import ResultadoTesis
+from utilsDashboard import generar_datos_dashboard
+from servicesGeminiProcesa import procesar_documento_gemini, extraer_reglas_gemini
 
 # ==========================================
 # 1. Configuración de la App y CORS
@@ -18,6 +24,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Montar la carpeta de reportes para hacerla accesible vía HTTP
+app.mount("/reportes", StaticFiles(directory="./reportes_pdf"), name="reportes")
+
+TEMP_DIR = "./temp_trabajos"
+os.makedirs(TEMP_DIR,exist_ok=True)
 
 # ==========================================
 # 2. Gestor de WebSockets (Para el Frontend)
@@ -41,128 +53,110 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 # ==========================================
-# 3. Esquemas Pydantic (La estructura estricta)
+# 3. Lógica de Procesamiento
 # ==========================================
-class ResultadoTesis(BaseModel):
-    nombre_archivo: str
-    nombre_alumnos: list[str]
-    nota: float
-    estado: str
-    errores_forma: list[str]
-    errores_fondo: list[str]
-    bases_de_datos: list[str]
-    tiempo_procesamiento_segundos: float
 
-# ==========================================
-# 4. Lógica de Procesamiento (El Core Multihilo)
-# ==========================================
-# Variables globales en memoria para almacenar los resultados listos para el dashboard
-resultados_globales: List[ResultadoTesis] = []
+resultados_globales: Dict[str,List[ResultadoTesis]] = {}
 
-async def simular_revision_gemini(archivo: str, prompt: str, client_id: str, sem: asyncio.Semaphore):
-    """
-    Esta función simula la llamada a LangChain/Gemini. 
-    El semáforo garantiza que solo 3 de estas funciones corran al mismo tiempo.
-    """
-    async with sem:
-        await manager.send_personal_message(json.dumps({"tipo": "estado", "mensaje": f"Iniciando revisión de: {archivo}..."}), client_id)
-        
-        # Aquí iría tu lógica real de LangChain procesando el Word
-        await asyncio.sleep(4) # Simulamos que toma 4 segundos procesar
-        
-        await manager.send_personal_message(json.dumps({"tipo": "estado", "mensaje": f"Estructurando reporte de: {archivo}..."}), client_id)
-        
-        # Simulamos el objeto Pydantic que te devolvería Gemini
-        resultado = ResultadoTesis(
-            nombre_archivo=archivo,
-            nombre_alumnos=["Juan Perez"],
-            nota=15.5,
-            estado="Aprobado",
-            errores_forma=["Márgenes incorrectos", "Falta interlineado 1.5"],
-            errores_fondo=["Falta justificación práctica"],
-            bases_de_datos=["Scopus", "Zenodo"],
-            tiempo_procesamiento_segundos=4.0
-        )
-        resultados_globales.append(resultado)
-        
-        await manager.send_personal_message(json.dumps({"tipo": "completado", "archivo": archivo}), client_id)
-
-async def orquestador_multihilo(archivos_nombres: List[str], prompt: str, client_id: str):
-    """
-    Lanza todas las tareas, pero el semáforo interno limita a 3 a la vez.
-    """
-    resultados_globales.clear() # Limpiamos resultados anteriores
-    sem = asyncio.Semaphore(3) # Límite estricto de concurrencia
+async def orquestador_multihilo(ruta_reglas:str,archivos_info: List[Dict[str,str]], prompt:str,job_id:str):
+    resultados_globales[job_id] = []
+    total_archivos = len(archivos_info)
     
-    tareas = [ simular_revision_gemini(archivo, prompt, client_id, sem) for archivo in archivos_nombres ]
+    #PROCESAR EL WORD DE REVISION A JSON
+    await manager.send_personal_message(json.dumps({
+        "estado":"PROCESANDO",
+        "procesados":0,
+        "total":total_archivos,
+        "mensaje":"Leyendo archivo de reglas de revisión y construyendo rúbrica..."
+    }),job_id)
+    
+    diccionario_reglas = await extraer_reglas_gemini(ruta_reglas)
+    
+    if os.path.exists(ruta_reglas):
+        os.remove(ruta_reglas)
+        
+    
+    #PROCESAR LAS TESIS CON EL DICCIONARIO DE REVISION
+    procesados = 0
+    sem = asyncio.Semaphore(3)
+    
+    async def worker(info: Dict[str,str]):
+        nonlocal procesados
+        async with sem:
+            await manager.send_personal_message(json.dumps({
+                "estado":"PROCESANDO",
+                "procesados":procesados,
+                "total":total_archivos,
+                "mensaje":f"Analizando profundidad lógica y formato de: {info['nombre']}..."
+            }),job_id)
+        
+        resultado = await procesar_documento_gemini(info,prompt,diccionario_reglas,manager,job_id,sem)
+        resultados_globales[job_id].append(resultado)
+        
+        procesados+=1
+        
+        await manager.send_personal_message(json.dumps({
+            "estado":"PROCESANDO",
+            "procesados":procesados,
+            "total":total_archivos,
+            "mensaje":f"Evaluación de {info['nombre']} completada."
+        }),job_id)
+        
+        if os.path.exists(info['ruta']):
+            os.remove(info['ruta'])
+    
+    tareas = [worker(info) for info in archivos_info]
     await asyncio.gather(*tareas)
     
-    # Avisamos al frontend que TODO el lote terminó para que pida el dashboard
-    await manager.send_personal_message(json.dumps({"tipo": "finalizado_total", "mensaje": "Todas las tesis han sido procesadas."}), client_id)
+    #Preparamos la data del dashboard
+    datos_dashboard = generar_datos_dashboard(resultados_globales[job_id])
+    
+    await manager.send_personal_message(json.dumps({
+        "estado": "COMPLETADO",
+        "total": total_archivos,
+        "mensaje": "Revisión finalizada con éxito.",
+        "data_dashboard": datos_dashboard
+    }), job_id)
 
 # ==========================================
-# 5. Rutas (Endpoints)
+# 4. Rutas (Endpoints)
 # ==========================================
 
 @app.post("/api/subir-tesis")
 async def subir_tesis(
     background_tasks: BackgroundTasks,
-    client_id: str = Form(...),
-    prompt: str = Form(...),
+    prompt: str = Form(""),
+    archivo_reglas:UploadFile=File(...),
     archivos: List[UploadFile] = File(...)
 ):
-    """
-    Ruta inicial que recibe los archivos y el prompt desde el Dropzone.
-    Nota: Si envías los archivos desde el frontend en chunks de 30MB, 
-    aquí debes implementar la lógica para ensamblar los chunks en un archivo temporal.
-    """
-    nombres_archivos = []
+    job_id = str(uuid.uuid4())
     
+    #Guardar el archivo de reglas
+    ruta_reglas = os.path.join(TEMP_DIR,f"{job_id}_REGLAS_{archivo_reglas.filename}")
+    with open(ruta_reglas,"wb") as buffer:
+        import shutil
+        shutil.copyfileobj(archivo_reglas.file,buffer)
+    
+    #Guardar los archivos a evaluar
+    archivos_info = []
     for archivo in archivos:
-        # Aquí guardarías el archivo físicamente o en memoria
-        # contenido = await archivo.read()
-        nombres_archivos.append(archivo.filename)
+        ruta_temporal = os.path.join(TEMP_DIR,f"{job_id}_{archivo.filename}")
+        with open(ruta_temporal,"wb") as buffer:
+            import shutil
+            shutil.copyfileobj(archivo.file,buffer)
+            
+        archivos_info.append({"ruta":ruta_temporal,"nombre":archivo.filename})
         
-    # Lanzamos el procesamiento en segundo plano para no bloquear esta petición
-    background_tasks.add_task(orquestador_multihilo, nombres_archivos, prompt, client_id)
+    # Lanzamos el orquestador pasando la ruta de las reglas
+    background_tasks.add_task(orquestador_multihilo, ruta_reglas,archivos_info, prompt, job_id)
     
-    return {"mensaje": "Archivos recibidos correctamente, iniciando procesamiento...", "archivos": nombres_archivos}
+    return {"job_id": job_id}
 
-
-@app.get("/api/dashboard-stats")
-async def obtener_metricas_dashboard():
-    """
-    Next.js llama a esta ruta cuando el WebSocket avisa que terminó el proceso.
-    Aquí haces los cálculos nativos con Python sobre 'resultados_globales'.
-    """
-    total_tesis = len(resultados_globales)
-    if total_tesis == 0:
-        return {"error": "No hay datos procesados."}
-
-    aprobados = sum(1 for t in resultados_globales if t.estado == "Aprobado")
-    promedio_general = sum(t.nota for t in resultados_globales) / total_tesis
-    
-    # Puedes usar collections.Counter aquí para los top errores y bases de datos
-
-    return {
-        "total_analizados": total_tesis,
-        "aprobados": aprobados,
-        "desaprobados": total_tesis - aprobados,
-        "promedio_global": round(promedio_general, 2),
-        "resultados_detallados": [t.dict() for t in resultados_globales]
-    }
-
-
-@app.websocket("/ws/progreso/{client_id}")
-async def websocket_endpoint(websocket: WebSocket, client_id: str):
-    """
-    Ruta para la conexión en tiempo real. 
-    Next.js se conecta aquí apenas el usuario entra a la página.
-    """
-    await manager.connect(websocket, client_id)
+@app.websocket("/ws/progreso/{job_id}")
+async def websocket_endpoint(websocket: WebSocket, job_id: str):
+    await manager.connect(websocket, job_id)
     try:
         while True:
-            # Mantenemos la conexión viva esperando mensajes del cliente (si fueran necesarios)
-            data = await websocket.receive_text()
+            await websocket.receive_text()
     except WebSocketDisconnect:
-        manager.disconnect(client_id)
+        manager.disconnect(job_id)
