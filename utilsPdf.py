@@ -1,4 +1,5 @@
 import os
+import json
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -7,6 +8,19 @@ from reportlab.lib import colors
 # Carpeta temporal para los reportes (se creará si no existe)
 REPORTES_DIR = "./reportes_pdf"
 os.makedirs(REPORTES_DIR, exist_ok=True)
+
+def sanitizar_valor(valor)->str:
+    """
+    Se asegura de que el valor devuelto por Gemini sea siempre un string plano
+    para evitar que ReportLab colapse si la IA devuelve diccionarios o listas.
+    """
+    if isinstance(valor, dict):
+        # Extraemos solo los valores del diccionario como texto
+        return " - ".join([str(v) for v in valor.values()])
+    elif isinstance(valor, list):
+        return ", ".join([str(x) for x in valor])
+    return str(valor)
+
 
 def generar_pdf_reporte(datos: dict, job_id: str) -> str:
     """
@@ -43,24 +57,30 @@ def generar_pdf_reporte(datos: dict, job_id: str) -> str:
 
     # --- METADATOS ---
     story.append(Paragraph(f"<b>Documento Analizado:</b> {datos['nombre_archivo']}", estilo_normal))
-    story.append(Paragraph(f"<b>Título Identificado:</b> {datos['titulo_trabajo']}", estilo_normal))
-    story.append(Paragraph(f"<b>Autor(es):</b> {', '.join(datos['nombre_alumnos'])}", estilo_normal))
+    titulo_limpio = sanitizar_valor(datos['titulo_trabajo'])
+    story.append(Paragraph(f"<b>Título Identificado:</b> {titulo_limpio}", estilo_normal))
+    
+    autores_str = ", ".join(datos['nombre_alumnos']) if isinstance(datos['nombre_alumnos'], list) else str(datos['nombre_alumnos'])
+    story.append(Paragraph(f"<b>Autor(es):</b> {autores_str}", estilo_normal))
+    
     
     # Color de nota dinámico
     color_nota = "green" if datos['nota'] >= 14 else "red"
     story.append(Paragraph(f"<b>Calificación Asignada:</b> <font color={color_nota}>{datos['nota']}/20 ({datos['estado']})</font>", estilo_normal))
     
-    story.append(Paragraph(f"<b>Bases de Datos Detectadas:</b> {', '.join(datos['bases_de_datos']) if datos['bases_de_datos'] else 'Ninguna'}", estilo_normal))
+    bases_str = ", ".join(datos['bases_de_datos']) if datos['bases_de_datos'] and isinstance(datos['bases_de_datos'], list) else 'Ninguna'
+    story.append(Paragraph(f"<b>Bases de Datos Detectadas:</b> {bases_str}", estilo_normal))
     story.append(Spacer(1, 20))
 
     # --- OBSERVACIONES DE FORMA ---
     story.append(Paragraph("1. Observaciones de Forma", estilo_subtitulo))
     story.append(Spacer(1, 5))
-    if datos['errores_forma']:
+    if datos['errores_forma'] and isinstance(datos['errores_forma'], dict):
         for llave, descripcion in datos['errores_forma'].items():
-            titulo_error = llave.replace("_", " ").capitalize()
+            titulo_error = str(llave).replace("_", " ").capitalize()
+            desc_limpia = sanitizar_valor(descripcion)
             story.append(Paragraph(f"{titulo_error}:", estilo_llave))
-            story.append(Paragraph(descripcion, estilo_normal))
+            story.append(Paragraph(desc_limpia, estilo_normal))
             story.append(Spacer(1, 10))
     else:
         story.append(Paragraph("✓ No se encontraron errores de forma.", estilo_normal))
@@ -70,11 +90,13 @@ def generar_pdf_reporte(datos: dict, job_id: str) -> str:
     # --- OBSERVACIONES DE FONDO ---
     story.append(Paragraph("2. Observaciones de Fondo", estilo_subtitulo))
     story.append(Spacer(1, 5))
-    if datos['errores_fondo']:
+    if datos['errores_fondo'] and isinstance(datos['errores_fondo'], dict):
         for llave, descripcion in datos['errores_fondo'].items():
-            titulo_error = llave.replace("_", " ").capitalize()
+            titulo_error = str(llave).replace("_", " ").capitalize()
+            desc_limpia = sanitizar_valor(descripcion)
+            
             story.append(Paragraph(f"{titulo_error}:", estilo_llave))
-            story.append(Paragraph(descripcion, estilo_normal))
+            story.append(Paragraph(desc_limpia, estilo_normal))
             story.append(Spacer(1, 10))
     else:
         story.append(Paragraph("✓ No se encontraron errores de fondo.", estilo_normal))

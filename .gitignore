@@ -1,2 +1,4 @@
 venv/*
 .env
+reportes_pdf/*
+temp_trabajos/*

@@ -25,6 +25,57 @@ def extraer_texto_docx(ruta_archivo:str) -> str:
         return ""
 
 
+def extraer_info_completa_docx(ruta_archivo:str)->dict:
+    """
+    Extrae el texto y los metadatos de formato de un archivo word
+    """
+    try:
+        doc = docx.Document(ruta_archivo)
+        
+        reporte_secciones = []
+        for i, section in enumerate(doc.sections):
+            reporte_secciones.append({
+                "seccion_nro": i + 1,
+                "margenes": {
+                    "superior": round(section.top_margin.cm, 2),
+                    "inferior": round(section.bottom_margin.cm, 2),
+                    "izquierdo": round(section.left_margin.cm, 2),
+                    "derecho": round(section.right_margin.cm, 2)
+                }
+            })
+        
+        estilos_cuerpo = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                estilos_cuerpo.append({
+                    "texto_breve": para.text[:30] + "...", # Referencia para la IA
+                    "interlineado": para.paragraph_format.line_spacing,
+                    "alineacion": str(para.alignment),
+                    "fuente": para.runs[0].font.name if para.runs and para.runs[0].font.name else "Heredado",
+                    "tamano": para.runs[0].font.size.pt if para.runs and para.runs[0].font.size else "Heredado"
+                })
+                
+        reporte_tablas = []
+        for i, table in enumerate(doc.tables):
+            # Analizamos la primera celda como muestra del formato de la tabla
+            first_cell_para = table.rows[0].cells[0].paragraphs[0]
+            reporte_tablas.append({
+                "tabla_nro": i + 1,
+                "fuente": first_cell_para.runs[0].font.name if first_cell_para.runs else "Heredado",
+                "tamano": first_cell_para.runs[0].font.size.pt if first_cell_para.runs else "Heredado"
+            })
+        
+        return {
+            "secciones":reporte_secciones,
+            "muestreo_cuerpo":estilos_cuerpo[::5],
+            "tablas":reporte_tablas,
+            "texto_completo": "\n".join([p.text for p in doc.paragraphs])
+        }
+    except Exception as e:
+        print(f"Error extrayendo información del documento: {e}")
+        return {"metadatos": {}, "texto": ""}
+    
+
 async def extraer_reglas_gemini(ruta_rubrica:str) -> dict:
     """
     Sube el archivo físicamente a la API de Gemini para que lo lea nativamente 
@@ -32,15 +83,19 @@ async def extraer_reglas_gemini(ruta_rubrica:str) -> dict:
     """
     
     diccionario_reglas = {"forma":{},"fondo":{}}
-    archivo_gemini = None
+    #archivo_gemini = None
+    texto_rubrica = extraer_texto_docx(ruta_rubrica)
+    
+    if not texto_rubrica:
+        return diccionario_reglas
     
     try:
-        archivo_gemini = genai.upload_file(path=ruta_rubrica)
+        #archivo_gemini = genai.upload_file(path=ruta_rubrica)
     
         prompt_sistema=f"""
         Actúa como un experto en extracción de datos y estructuración de documentos académicos. Tu tarea es analizar el documento que te envio que es una una guía normativa y convertirlo en un objeto JSON siguiendo estrictamente una jerarquía de "Forma" y "Fondo" por sección.
         INSTRUCCIONES DE SALIDA:
-        Formato: Devuelve UNICAMENTE el código JSON dentro de un bloque de código.
+        Formato: Devuelve UNICAMENTE el código JSON, sin formato markdown.
         Estructura Raíz: El JSON debe tener dos ramas principales: "forma" y "fondo".
         Rama "forma": Incluye todas las reglas generales de presentación (Ejm: márgenes, fuentes, interlineado, normas de citación, medios de entrega, etc.).
         Rama "fondo": Desglosa cada sección del documento (Ejm: Carátula, Jurado, Introducción, Referencias, Anexos, etc.) detallando los requisitos de contenido obligatorios para cada una.
@@ -54,11 +109,24 @@ async def extraer_reglas_gemini(ruta_rubrica:str) -> dict:
             generation_config={"temperature":0.3}
         )
         
-        respuesta = await modelo.generate_content_async([
-            archivo_gemini,
-            "Analiza el documento adjunto y extrae las reglas en formato JSON."
-        ])
-        
+        intentos = 0
+        while intentos < 3: 
+            try:
+                respuesta = await modelo.generate_content_async([
+                    #archivo_gemini,
+                    #"Analiza el documento adjunto y extrae las reglas en formato JSON."
+                    f"DOCUMENTO NORMATIVO:\n\n{texto_rubrica}"
+                ])
+                break # si hay exito
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "Quota exceeded" in error_str:
+                    intentos+=1
+                    print(f"Límite de API alcanzado leyendo reglas. Pausa de 30s... (Intento {intentos}/3)")
+                    await asyncio.sleep(30)
+                else:
+                    raise e
+            
         contenido_crudo = respuesta.text.strip()
         
         #Limpieza de comillas
@@ -76,14 +144,29 @@ async def extraer_reglas_gemini(ruta_rubrica:str) -> dict:
         print(f"Error al decodificar el JSON devuelto por Gemini: {e}")
     except Exception as e:
         print(f"Error general en la llamada a Gemini: {e}")
-    finally:
-        if archivo_gemini:
-            try:
-                genai.delete_file(archivo_gemini.name)
-            except Exception as e:
-                print(f"No se pudo eliminar el archivo temporal de Gemini: {e}")
+    #finally:
+    #    if archivo_gemini:
+    #        try:
+    #            genai.delete_file(archivo_gemini.name)
+    #        except Exception as e:
+    #            print(f"No se pudo eliminar el archivo temporal de Gemini: {e}")
 
     return diccionario_reglas
+
+def aplanar_errores(errores_crudos):
+    if not isinstance(errores_crudos, dict):
+        return {}
+    errores_limpios = {}
+    for llave, valor in errores_crudos.items():
+        if isinstance(valor, dict):
+            # Si Gemini anidó otro diccionario, unimos sus valores como texto
+            errores_limpios[llave] = " - ".join([str(v) for v in valor.values()])
+        elif isinstance(valor, list):
+            # Si Gemini devolvió una lista, la convertimos a texto
+            errores_limpios[llave] = ", ".join([str(v) for v in valor])
+        else:
+            errores_limpios[llave] = str(valor)
+    return errores_limpios
 
 
 async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manager, job_id: str, sem: asyncio.Semaphore) -> ResultadoTesis:
@@ -101,7 +184,10 @@ async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manage
         
         try:
             # 1. Subir la tesis del alumno a los servidores de Gemini
-            archivo_gemini = genai.upload_file(path=info['ruta'])
+            #archivo_gemini = genai.upload_file(path=info['ruta'])
+            
+            #1. Extrar el texto de la tesis localmente
+            info_doc = extraer_info_completa_docx(info['ruta'])
             
             # 2. Construir el prompt estricto integrando el diccionario de reglas
             prompt_sistema = f"""
@@ -110,40 +196,67 @@ async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manage
             Aquí está el contrato de evaluación (JSON):
             {json.dumps(reglas, ensure_ascii=False, indent=3)}
             
+            DATOS TÉCNICOS DEL DOCUMENTO (Usa esto para validar la forma):
+            
+            {json.dumps({
+                "secciones": info_doc["secciones"],
+                "muestreo_estilos_cuerpo": info_doc["muestreo_cuerpo"],
+                "formato_tablas": info_doc["tablas"]
+            }, ensure_ascii=False, indent=2)}
+            
+            GUÍA DE INTERPRETACIÓN TÉCNICA:
+            1. Carátula (Sección 1): Los márgenes y fuentes pueden variar ligeramente. Sé flexible aquí.
+            2. Cuerpo (Sección 2 en adelante): Los márgenes DEBEN cumplir estrictamente la regla (Ej: 3cm Izq, 2.5cm otros).
+            3. Tablas: Los datos técnicos de 'formato_tablas' indican si el alumno redujo la fuente en tablas. Según la normativa, esto es PERMITIDO. No lo marques como error.
+            4. Estilos: Valida que el 'muestreo_estilos_cuerpo' mantenga consistencia con el tipo de fuente y el interlineado.
+            
             Instrucciones adicionales del evaluador principal (usuario): {prompt}
             
             INSTRUCCIONES DE SALIDA:
-            Debes devolver UNICAMENTE un objeto JSON válido con la siguiente estructura exacta:
+            Debes devolver UNICAMENTE un objeto JSON válido con la siguiente estructura:
             {{
                 "titulo_trabajo": "Título de la tesis encontrado en la carátula o inicio",
-                "nombre_alumnos": ["Nombre del alumno 1", "Nombre del alumno 2"],
-                "nota": [Calificación numérica de 0 a 20 basada en la cantidad y gravedad de los errores],
+                "nombre_alumnos": ["Nombre 1", "Nombre 2 (si hay)"],
+                "nota": [Calificación numérica de 0 a 20 basada en la cantidad y gravedad de los errores, los errores de forma pesan menos que los errores de fondo, considera eso cuando coloques la nota.],
                 "errores_forma": {{
-                    // REGLA DE ORO: Solo puedes usar las llaves exactas del diccionario de reglas 'forma' provisto arriba.
-                    // Si el documento NO cumple la regla, usa esa llave. 
-                    // El valor debe ser tu explicación de por qué el documento falló esa regla.
-                    // Si el documento sí cumple la regla, NO incluyas la llave en este objeto.
+                    "llave_exacta_de_regla": "EXPLICACIÓN DETALLADA. Describe qué encontraste, en qué página/sección está el error, y cómo el alumno debe corregirlo según la rúbrica. (Mínimo 3 oraciones)."
                 }},
                 "errores_fondo": {{
-                    // Igual que arriba. Solo usa las llaves del diccionario de reglas 'fondo'.
-                    // El valor es el hallazgo o justificación de la penalización.
+                    "llave_exacta_de_regla": "EXPLICACIÓN DETALLADA. Menciona el hallazgo, el impacto en la investigación y la acción correctiva. (Mínimo 3 oraciones)."
                 }},
                 "bases_de_datos": ["Scopus", "IEEE", "PubMed", "Science Direct"] // Extrae las bases de datos bibliográficas detectadas en el documento.
             }}
-            No incluyas markdown (```json). No inventes llaves nuevas para los errores.
+            RESTRICCIÓN CRÍTICA DE FORMATO:
+            - Prohibido anidar diccionarios dentro de 'errores_forma' o 'errores_fondo'. 
+            - Cada valor debe ser un texto plano y extenso (string), NUNCA un sub-objeto o lista.
+            - Usa exactamente las mismas llaves del contrato.
+            - No incluyas markdown (```json).
             """
 
             modelo = genai.GenerativeModel(
                 model_name="gemini-2.5-flash",
                 system_instruction=prompt_sistema,
-                generation_config={"temperature": 0.2} # Temperatura baja para que sea estricto y no alucine
+                generation_config={"temperature": 0.2}
             )
-
-            # 3. Llamada a la IA
-            respuesta = await modelo.generate_content_async([
-                archivo_gemini, 
-                "Evalúa la tesis adjunta detalladamente y devuelve el JSON solicitado."
-            ])
+            
+            intentos = 0
+            while intentos < 3: 
+                try:
+                    # 3. Llamada a la IA
+                    respuesta = await modelo.generate_content_async([
+                        #archivo_gemini, 
+                        #"Evalúa la tesis adjunta detalladamente y devuelve el JSON solicitado."
+                        f"TEXTO COMPLETO DE LA TESIS PARA EVALUAR FONDO:\n\n{info_doc['texto_completo']}"
+                    ])
+                    break # si hay exito
+                except Exception as e:
+                    error_str = str(e)
+                    if "429" in error_str or "Quota exceeded" in error_str:
+                        intentos+=1
+                        print(f"Límite de API alcanzado leyendo Trabajos. Pausa de 30s... (Intento {intentos}/3)")
+                        await asyncio.sleep(30)
+                    else:
+                        raise e
             
             contenido_crudo = respuesta.text.strip()
             
@@ -162,8 +275,8 @@ async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manage
             titulo_trabajo = datos_extraidos.get("titulo_trabajo", titulo_trabajo)
             nombre_alumnos = datos_extraidos.get("nombre_alumnos", nombre_alumnos)
             nota = float(datos_extraidos.get("nota", 0.0))
-            errores_forma_detectados = datos_extraidos.get("errores_forma", {})
-            errores_fondo_detectados = datos_extraidos.get("errores_fondo", {})
+            errores_forma_detectados = aplanar_errores(datos_extraidos.get("errores_forma", {}))
+            errores_fondo_detectados = aplanar_errores(datos_extraidos.get("errores_fondo", {}))
             bases_de_datos = datos_extraidos.get("bases_de_datos", [])
 
         except json.JSONDecodeError as e:
