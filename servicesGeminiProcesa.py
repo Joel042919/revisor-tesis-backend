@@ -109,6 +109,7 @@ async def extraer_reglas_gemini(ruta_rubrica:str) -> dict:
             generation_config={"temperature":0.3}
         )
         
+        respuesta = None
         intentos = 0
         while intentos < 3: 
             try:
@@ -126,7 +127,9 @@ async def extraer_reglas_gemini(ruta_rubrica:str) -> dict:
                     await asyncio.sleep(30)
                 else:
                     raise e
-            
+        if not respuesta:
+            raise Exception("Se agotaron los 3 intentos para contactar a Gemini (Reglas). La API está muy saturada.")
+         
         contenido_crudo = respuesta.text.strip()
         
         #Limpieza de comillas
@@ -159,10 +162,15 @@ def aplanar_errores(errores_crudos):
     errores_limpios = {}
     for llave, valor in errores_crudos.items():
         if isinstance(valor, dict):
-            # Si Gemini anidó otro diccionario, unimos sus valores como texto
-            errores_limpios[llave] = " - ".join([str(v) for v in valor.values()])
+            # Formateo mejorado para anidaciones (como las de tu imagen)
+            textos_anidados = []
+            for sub_k, sub_v in valor.items():
+                if isinstance(sub_v, dict):
+                     # Si la IA anida un nivel más, lo aplanamos a la fuerza
+                     sub_v = " - ".join([str(v) for v in sub_v.values()])
+                textos_anidados.append(f"{str(sub_k).replace('_', ' ').title()}: {str(sub_v)}")
+            errores_limpios[llave] = "\n".join(textos_anidados)
         elif isinstance(valor, list):
-            # Si Gemini devolvió una lista, la convertimos a texto
             errores_limpios[llave] = ", ".join([str(v) for v in valor])
         else:
             errores_limpios[llave] = str(valor)
@@ -210,6 +218,7 @@ async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manage
             3. Tablas: Los datos técnicos de 'formato_tablas' indican si el alumno redujo la fuente en tablas. Según la normativa, esto es PERMITIDO. No lo marques como error.
             4. Estilos: Valida que el 'muestreo_estilos_cuerpo' mantenga consistencia con el tipo de fuente y el interlineado.
             
+            El trabaj empieza en 20 luego por los errores se va descontando, recuerda los errores de fondo pesan mas que los de forma.
             Instrucciones adicionales del evaluador principal (usuario): {prompt}
             
             INSTRUCCIONES DE SALIDA:
@@ -217,7 +226,7 @@ async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manage
             {{
                 "titulo_trabajo": "Título de la tesis encontrado en la carátula o inicio",
                 "nombre_alumnos": ["Nombre 1", "Nombre 2 (si hay)"],
-                "nota": [Calificación numérica de 0 a 20 basada en la cantidad y gravedad de los errores, los errores de forma pesan menos que los errores de fondo, considera eso cuando coloques la nota.],
+                "nota": [Calificación numérica de 0 a 20 basada en la cantidad y gravedad de los errores],
                 "errores_forma": {{
                     "llave_exacta_de_regla": "EXPLICACIÓN DETALLADA. Describe qué encontraste, en qué página/sección está el error, y cómo el alumno debe corregirlo según la rúbrica. (Mínimo 3 oraciones)."
                 }},
@@ -239,6 +248,7 @@ async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manage
                 generation_config={"temperature": 0.2}
             )
             
+            respuesta = None
             intentos = 0
             while intentos < 3: 
                 try:
@@ -258,6 +268,9 @@ async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manage
                     else:
                         raise e
             
+            if not respuesta:
+                raise Exception("Se agotaron los 3 intentos para contactar a Gemini (Reglas). La API está muy saturada.")
+            
             contenido_crudo = respuesta.text.strip()
             
             # 4. Limpieza de etiquetas Markdown
@@ -274,7 +287,14 @@ async def procesar_documento_gemini(info: dict, prompt: str, reglas:dict, manage
             # 6. Asignar de forma segura usando .get()
             titulo_trabajo = datos_extraidos.get("titulo_trabajo", titulo_trabajo)
             nombre_alumnos = datos_extraidos.get("nombre_alumnos", nombre_alumnos)
-            nota = float(datos_extraidos.get("nota", 0.0))
+            nota_bruta = float(datos_extraidos.get("nota", 0.0))
+            if isinstance(nota_bruta, list) and len(nota_bruta) > 0:
+                nota = float(nota_bruta[0])
+            else:
+                try:
+                    nota = float(nota_bruta)
+                except:
+                    nota = 0.0
             errores_forma_detectados = aplanar_errores(datos_extraidos.get("errores_forma", {}))
             errores_fondo_detectados = aplanar_errores(datos_extraidos.get("errores_fondo", {}))
             bases_de_datos = datos_extraidos.get("bases_de_datos", [])
