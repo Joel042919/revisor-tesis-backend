@@ -166,23 +166,30 @@ async def procesar_documento_openai(info: dict, prompt: str, reglas: dict, manag
             
             INSTRUCCIONES CRÍTICAS DE SALIDA (FORMATO JSON):
             Debes devolver UNICAMENTE un JSON con esta estructura exacta:
-            Esa "nota":15 es solo un ejemplo, la nota real debe basarse en el análisis riguroso del documento contra las reglas.
             {{
                 "titulo_trabajo": "Título de la tesis",
                 "nombre_alumnos": ["Nombre 1"],
                 "nota": 15,
                 "errores_forma": {{ 
-                    "llave_exacta_de_regla": "REPORTE EXHAUSTIVO: (1) Regla infringida: [Cita la regla original]. (2) Hallazgo: [Describe a detalle qué contraste encontraste usando los metadatos técnicos]. (3) Corrección: [Instrucción clara de cómo solucionarlo]. Escribe un párrafo de al menos 50 palabras." 
+                    "llave_exacta_de_regla_1": "string con descripción detallada como se indicaba arriba. Si la regla se cumplió o no, igual debes escribir una descripción detallada explicando por qué se cumplió o no y resaltando las partes del documento que evidencian ese cumplimiento o no.",
+                    "llave_exacta_de_regla_2": "string con descripción detallada como se indicaba arriba. Si la regla se cumplió o no, igual debes escribir una descripción detallada explicando por qué se cumplió o no y resaltando las partes del documento que evidencian ese cumplimiento o no.",
+                    ...
+                    
                 }},
                 "errores_fondo": {{ 
-                    "llave_exacta_de_regla": "REPORTE EXHAUSTIVO: (1) Regla infringida: [Cita la regla]. (2) Hallazgo: [Explica abundantemente por qué el contenido del alumno es deficiente o incumple la norma]. (3) Impacto y Corrección: [Cómo afecta la investigación y qué debe reescribir]. Escribe un párrafo de al menos 60 palabras." 
+                    "llave_exacta_de_regla_1": "string con descripción detallada como se indicaba arriba. Si la regla se cumplió o no, igual debes escribir una descripción detallada explicando por qué se cumplió o no y resaltando las partes del documento que evidencian ese cumplimiento o no.",
+                    "llave_exacta_de_regla_2": "string con descripción detallada como se indicaba arriba. Si la regla se cumplió o no, igual debes escribir una descripción detallada explicando por qué se cumplió o no y resaltando las partes del documento que evidencian ese cumplimiento o no.",
+                    ...
                 }},
-                "bases_de_datos": ["Scopus", "IEEE"]
+                "bases_de_datos": ["Scopus", "IEEE", "Scielo","Web of Science","Google Scholar","ProQuest","Redalyc","Esmeral","Otros"]
             }}
             
             IMPORTANTE: 
             - Prohibido anidar diccionarios.
-            - Si el documento ES PERFECTO y saca 20, en lugar de dejar los errores vacíos, inventa una llave en 'errores_fondo' llamada 'evaluacion_general_destacada' y escribe un párrafo abundante elogiando y describiendo por qué cumplió perfectamente con la rúbrica. ¡El reporte nunca debe verse vacío!
+            - Esa "nota":15 es solo un ejemplo, la nota real debe basarse en el análisis riguroso del documento contra las reglas.
+            - OBLIGATORIO: Debes iterar sobre TODAS las reglas definidas en el contrato original. Tu salida en 'errores_forma' y 'errores_fondo' debe contener tantas claves como reglas existan en el contrato.
+            - En los errores de forma y fondo debes incluir tantas claves como reglas infringidas o aprobadas (la idea es que por cada clave des una descripcion detallada, si esta bien explicando porque y si esta mal explicando igual). Tu descripción detallada debe contener: Regla invocada, Hallazgo (cita la parte donde ocurrio ese problema), Evaluación (aprobado o no), Acción requerida (recomendación de mejora o correción).
+            - Esos ejemplos de nombres de "llave_exacta_de_regla_1", "llave_exacta_de_regla_2", etc. son solo ilustrativos. Las llaves deben ser exactamente las mismas que las reglas del JSON de entrada. Si una regla se llama "margen_superior", entonces la llave en errores_forma o errores_fondo debe ser exactamente "margen_superior" para esa regla, y así con cada regla. Esto es fundamental para que el sistema pueda mapear correctamente los errores detectados con las reglas establecidas.
             """
 
             intentos = 0
