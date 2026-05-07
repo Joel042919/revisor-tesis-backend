@@ -9,7 +9,8 @@ import os
 import uuid
 from models import ResultadoTesis
 from utilsDashboard import generar_datos_dashboard
-from servicesGeminiProcesa import procesar_documento_gemini, extraer_reglas_gemini
+#from servicesGeminiProcesa import procesar_documento_gemini, extraer_reglas_gemini
+from servicesOpenAIProcesa import procesar_documento_openai, extraer_reglas_openai
 
 # ==========================================
 # 1. Configuración de la App y CORS
@@ -70,7 +71,10 @@ async def orquestador_multihilo(ruta_reglas:str,archivos_info: List[Dict[str,str
         "mensaje":"Leyendo archivo de reglas de revisión y construyendo rúbrica..."
     }),job_id)
     
-    diccionario_reglas = await extraer_reglas_gemini(ruta_reglas)
+    ######GEMINI
+    #diccionario_reglas = await extraer_reglas_gemini(ruta_reglas)
+    ######OPENAI
+    diccionario_reglas = await extraer_reglas_openai(ruta_reglas)
     
     if os.path.exists(ruta_reglas):
         os.remove(ruta_reglas)
@@ -90,7 +94,10 @@ async def orquestador_multihilo(ruta_reglas:str,archivos_info: List[Dict[str,str
                 "mensaje":f"Analizando profundidad lógica y formato de: {info['nombre']}..."
             }),job_id)
         
-        resultado = await procesar_documento_gemini(info,prompt,diccionario_reglas,manager,job_id,sem)
+        #####GEMINI
+        #resultado = await procesar_documento_gemini(info,prompt,diccionario_reglas,manager,job_id,sem)
+        #####OPENAI
+        resultado = await procesar_documento_openai(info,prompt,diccionario_reglas,manager,job_id,sem)
         resultados_globales[job_id].append(resultado)
         
         procesados+=1
